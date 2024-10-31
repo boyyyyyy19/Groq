@@ -33,9 +33,9 @@ class TokenBucket:
         self.tokens += (now - self.last_update) * self.fill_rate
         self.tokens = min(self.tokens, self.capacity)
         self.last_update = now
+        self.tokens = self.tokens - tokens
 
-        self.tokens -= tokens
-        return self.tokens >= 0
+        return self.tokens >= tokens and self.tokens is not None
 
 class Crawl4AI:
     """
@@ -286,96 +286,102 @@ def determine_need_for_web_context(question: str) -> bool:
     question = question.lower()
     return any(keyword in question for keyword in context_keywords) or len(question.split()) > 5
 
+def attempt_chat_completion(max_retries: int, retry_delay: int, messages, client) -> None:
+    for attempt in range(max_retries):
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=messages,
+                model="llama-3.2-90b-vision-preview"
+            )
+            
+            ai_response = chat_completion.choices[0].message.content
+            print("\nAI Response:")
+            print(ai_response)
+            break
+            
+        except Exception as error:
+            if attempt < max_retries - 1:
+                logging.error(f"Attempt {attempt + 1} failed: {str(error)}")
+                time.sleep(retry_delay * (attempt + 1))
+            else:
+                print(f"Error: Failed to get response after {max_retries} attempts.")
+                logging.error(f"Final attempt failed: {str(error)}")
+
+def main_function_loop(client) -> None:
+    """The main loop for asking questions to the ai & getting responses."""
+    while True:
+        content = input("\nEnter your question, YouTube URL, or prompt (or 'quit' to exit): \n").strip()
+        
+        if content.lower() in ['quit', 'exit', 'bye']:
+            print("\nThank you for using the tool. Goodbye!")
+            break
+
+        if not content:
+            print("Please enter a valid input.")
+            continue
+
+        need_web_context = determine_need_for_web_context(content)
+        crawled_content = ""
+        
+        if need_web_context:
+            print("\nAnalyzing content...")
+            web_context_finder = WebContextFinder()
+            crawled_content = web_context_finder.find_relevant_context(content)
+            print("\nAnalysis complete. Generating response...\n")
+
+        messages = [
+            {
+                "role": "system",
+                "content": """You are an AI assistant designed to help users with general questions 
+                and YouTube video summaries. Use chain of thought reasoning and provide clear, 
+                concise responses. For YouTube videos, focus on key points and main takeaways."""
+            }
+        ]
+        
+        if crawled_content:
+            messages.append({
+                "role": "system",
+                "content": f"Content Analysis Results: {crawled_content}"
+            })
+        
+        messages.append({
+            "role": "user",
+            "content": content,
+        })
+
+        max_retries = 3
+        retry_delay = 2
+        attempt_chat_completion(max_retries, retry_delay, messages, client)        
+
 def main():
     """Main function to run the web context and analysis tool."""
-    try:
-        # Install required packages
-        logging.info("Checking and installing required packages...")
-        install_required_packages()
+    # Install required packages
+    logging.info("Checking and installing required packages...")
+    install_required_packages()
 
-        # Import Groq after installation
-        from groq import Groq
+    # Import Groq after installation
+    from groq import Groq
+    
+    # Initialize Groq client
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY environment variable not set")
         
-        # Initialize Groq client
-        api_key = os.getenv("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")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY environment variable not set")
-            
-        client = Groq(api_key=api_key)
+    client = Groq(api_key=api_key)
 
-        print("\nWeb Context and Analysis Tool")
-        print("=" * 30)
-        print("1. Ask any question")
-        print("2. Paste a YouTube URL for summary")
-        print("3. Type 'quit' to exit")
-        print("=" * 30)
-        
-        while True:
-            content = input("\nEnter your question, YouTube URL, or prompt (or 'quit' to exit): \n").strip()
-            
-            if content.lower() in ['quit', 'exit', 'bye']:
-                print("\nThank you for using the tool. Goodbye!")
-                break
+    print("\nWeb Context and Analysis Tool")
+    print("=" * 30)
+    print("1. Ask any question")
+    print("2. Paste a YouTube URL for summary")
+    print("3. Type 'quit' to exit")
+    print("=" * 30)
+    
+    main_function_loop(client)
 
-            if not content:
-                print("Please enter a valid input.")
-                continue
-
-            need_web_context = determine_need_for_web_context(content)
-            crawled_content = ""
-            
-            if need_web_context:
-                print("\nAnalyzing content...")
-                web_context_finder = WebContextFinder()
-                crawled_content = web_context_finder.find_relevant_context(content)
-                print("\nAnalysis complete. Generating response...\n")
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": """You are an AI assistant designed to help users with general questions 
-                    and YouTube video summaries. Use chain of thought reasoning and provide clear, 
-                    concise responses. For YouTube videos, focus on key points and main takeaways."""
-                }
-            ]
-            
-            if crawled_content:
-                messages.append({
-                    "role": "system",
-                    "content": f"Content Analysis Results: {crawled_content}"
-                })
-            
-            messages.append({
-                "role": "user",
-                "content": content,
-            })
-
-            max_retries = 3
-            retry_delay = 2
-            
-            for attempt in range(max_retries):
-                try:
-                    chat_completion = client.chat.completions.create(
-                        messages=messages,
-                        model="llama-3.2-90b-vision-preview"
-                    )
-                    
-                    ai_response = chat_completion.choices[0].message.content
-                    print("\nAI Response:")
-                    print(ai_response)
-                    break
-                    
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logging.error(f"Attempt {attempt + 1} failed: {str(e)}")
-                        time.sleep(retry_delay * (attempt + 1))
-                    else:
-                        print(f"Error: Failed to get response after {max_retries} attempts.")
-                        logging.error(f"Final attempt failed: {str(e)}")
-
-    except Exception as e:
-        logging.error(f"Main function error: {str(e)}")
-        print(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    try: main()
+
+    except Exception as error:
+        print(f"An error occurred: {str(error)}")
+        logging.error(f"Main function error: {str(error)}")

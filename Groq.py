@@ -7,6 +7,10 @@ import time
 import logging
 import json
 from typing import List, Dict, Set, Optional
+from urllib.parse import urlparse, parse_qs
+import requests
+from bs4 import BeautifulSoup
+from tqdm import tqdm
 
 # Setup logging
 logging.basicConfig(
@@ -14,300 +18,337 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
+class TokenBucket:
+    """
+    Implements rate limiting using the token bucket algorithm.
+    """
+    def __init__(self, tokens: int, fill_rate: float):
+        self.capacity = tokens
+        self.tokens = tokens
+        self.fill_rate = fill_rate
+        self.last_update = time.time()
+
+    def consume(self, tokens: int = 1) -> bool:
+        now = time.time()
+        self.tokens += (now - self.last_update) * self.fill_rate
+        self.tokens = min(self.tokens, self.capacity)
+        self.last_update = now
+
+        return self.tokens >= tokens and (self.tokens := self.tokens - tokens) is not None
+
+class Crawl4AI:
+    """
+    Web crawler optimized for AI context gathering.
+    """
+    def __init__(self, max_pages: int = 5, rate_limit: int = 1):
+        self.max_pages = max_pages
+        self.rate_limiter = TokenBucket(tokens=rate_limit, fill_rate=0.5)
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (compatible; Crawl4AI/1.0; +http://example.com/bot)'
+        })
+
+    def clean_text(self, text: str) -> str:
+        """Clean and normalize text content."""
+        if not text:
+            return ""
+        text = re.sub(r'\s+', ' ', text.strip())
+        text = re.sub(r'[^\w\s.,!?-]', '', text)
+        return text
+
+    def extract_text(self, soup: BeautifulSoup) -> str:
+        """Extract meaningful text from HTML content."""
+        # Remove unwanted elements
+        for element in soup(['script', 'style', 'header', 'footer', 'nav']):
+            element.decompose()
+
+        return self.clean_text(soup.get_text(separator=' ', strip=True))
+
+    def is_valid_url(self, url: str) -> bool:
+        """Check if URL is valid and allowed."""
+        try:
+            parsed = urlparse(url)
+            return bool(parsed.scheme and parsed.netloc)
+        except Exception:
+            return False
+
+    def crawl(self, url: str) -> List[Dict]:
+        """Crawl a webpage and extract relevant content."""
+        if not self.is_valid_url(url):
+            logging.warning(f"Invalid URL: {url}")
+            return []
+
+        results = []
+        try:
+            while not self.rate_limiter.consume():
+                time.sleep(0.1)
+
+            response = self.session.get(url, timeout=10)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract content
+            title = soup.title.string if soup.title else ''
+            description = soup.find('meta', attrs={'name': 'description'})
+            description = description.get('content', '') if description else ''
+            text = self.extract_text(soup)
+
+            results.append({
+                'url': url,
+                'title': self.clean_text(title),
+                'description': self.clean_text(description),
+                'text': text,
+                'timestamp': datetime.now().isoformat()
+            })
+
+        except Exception as e:
+            logging.error(f"Error crawling {url}: {str(e)}")
+
+        return results
+
 def install_required_packages():
-    """
-    Check and install required packages if they're missing.
-    """
+    """Check and install required packages if they're missing."""
     required_packages = [
         'groq',
         'requests',
         'beautifulsoup4',
         'urllib3',
         'tqdm',
-        'duckduckgo_search'
+        'duckduckgo_search',
+        'youtube-transcript-api',
+        'yt-dlp'
     ]
     
     for package in required_packages:
         try:
             __import__(package)
+            logging.info(f"Package {package} is already installed")
         except ImportError:
-            print(f"Installing required package: {package}")
+            logging.info(f"Installing package: {package}")
             subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# Install required packages
-print("Checking and installing required packages...")
-install_required_packages()
-
-# Now import the required packages
-from groq import Groq
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-from tqdm import tqdm
-from duckduckgo_search import DDGS
-
-class TokenBucket:
-    """
-    Implements token bucket algorithm for rate limiting.
-    """
-    def __init__(self, tokens_per_second: float, bucket_size: int):
-        self.tokens_per_second = tokens_per_second
-        self.bucket_size = bucket_size
-        self.tokens = bucket_size
-        self.last_update = time.time()
-
-    def get_token(self):
-        now = time.time()
-        time_passed = now - self.last_update
-        self.tokens = min(
-            self.bucket_size,
-            self.tokens + time_passed * self.tokens_per_second
-        )
-        self.last_update = now
-
-        if self.tokens >= 1:
-            self.tokens -= 1
-            return True
-        return False
-
-    def wait_for_token(self):
-        while not self.get_token():
-            time.sleep(0.1)
-
-class Crawl4AI:
-    def __init__(self, max_pages: int = 10, delay: float = 1.0):
-        """
-        Initialize the web crawler with rate limiting.
-        """
-        self.max_pages = max_pages
-        self.delay = delay
-        self.visited_urls: Set[str] = set()
-        self.results: List[Dict] = []
-        self.token_bucket = TokenBucket(tokens_per_second=2, bucket_size=10)
-        
-        # Configure headers for polite crawling
-        self.headers = {
-            'User-Agent': 'Crawl4AI Bot 1.0 - Educational Purpose Web Crawler',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
-            'Accept-Language': 'en-US,en;q=0.5',
+class YouTubeSummarizer:
+    """Handles YouTube video summarization functionality."""
+    def __init__(self):
+        # Import yt-dlp here after ensuring it's installed
+        import yt_dlp
+        self.yt_dlp = yt_dlp
+        self.ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True
         }
-        
-        # Setup session with retry mechanism
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
 
-    def is_valid_url(self, url: str) -> bool:
+    def extract_video_id(self, url: str) -> Optional[str]:
+        """Extract YouTube video ID from various URL formats."""
         try:
-            parsed = urlparse(url)
-            return bool(parsed.netloc) and bool(parsed.scheme)
-        except:
-            return False
-
-    def extract_text_and_links(self, url: str) -> Optional[Dict]:
-        """
-        Extract text content and links from a webpage with rate limiting.
-        """
-        try:
-            # Wait for rate limit token
-            self.token_bucket.wait_for_token()
-            
-            # Add delay for politeness
-            time.sleep(self.delay)
-            
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Remove script and style elements
-            for element in soup(["script", "style", "meta", "link"]):
-                element.decompose()
-            
-            # Extract text
-            text = soup.get_text(separator='\n', strip=True)
-            
-            # Extract links
-            links = []
-            for link in soup.find_all('a'):
-                href = link.get('href')
-                if href:
-                    absolute_url = urljoin(url, href)
-                    if self.is_valid_url(absolute_url):
-                        links.append(absolute_url)
-            
-            return {
-                'url': url,
-                'text': text,
-                'links': links,
-                'timestamp': datetime.now().isoformat()
-            }
-            
+            parsed_url = urlparse(url)
+            if parsed_url.hostname in ['www.youtube.com', 'youtube.com']:
+                if parsed_url.path == '/watch':
+                    return parse_qs(parsed_url.query)['v'][0]
+                elif parsed_url.path.startswith('/shorts/'):
+                    return parsed_url.path.split('/')[2]
+            elif parsed_url.hostname == 'youtu.be':
+                return parsed_url.path[1:]
         except Exception as e:
-            logging.error(f"Error crawling {url}: {str(e)}")
+            logging.error(f"Error extracting video ID: {str(e)}")
+        return None
+
+    def get_video_metadata(self, url: str) -> Dict:
+        """Get video metadata using yt-dlp."""
+        try:
+            with self.yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return {
+                    'title': info.get('title', 'Unknown'),
+                    'duration': info.get('duration', 0),
+                    'view_count': info.get('view_count', 0),
+                    'uploader': info.get('uploader', 'Unknown'),
+                    'upload_date': info.get('upload_date', 'Unknown')
+                }
+        except Exception as e:
+            logging.error(f"Error getting video metadata: {str(e)}")
+            return {}
+
+    def get_transcript(self, video_id: str) -> Optional[str]:
+        """Get video transcript using youtube-transcript-api."""
+        try:
+            from youtube_transcript_api import YouTubeTranscriptApi
+            from youtube_transcript_api.formatters import TextFormatter
+            
+            transcript = YouTubeTranscriptApi.get_transcript(video_id)
+            formatter = TextFormatter()
+            return formatter.format_transcript(transcript)
+        except Exception as e:
+            logging.error(f"Error getting transcript: {str(e)}")
             return None
 
-    def crawl(self, start_url: str) -> List[Dict]:
-        """
-        Start crawling from a given URL with progress bar.
-        """
-        if not self.is_valid_url(start_url):
-            raise ValueError("Invalid start URL provided")
-        
-        urls_to_visit = [start_url]
-        pbar = tqdm(total=self.max_pages, desc="Crawling pages")
-        
-        while urls_to_visit and len(self.visited_urls) < self.max_pages:
-            current_url = urls_to_visit.pop(0)
-            
-            if current_url in self.visited_urls:
-                continue
-                
-            logging.info(f"Crawling: {current_url}")
-            self.visited_urls.add(current_url)
-            
-            result = self.extract_text_and_links(current_url)
-            if result:
-                self.results.append(result)
-                urls_to_visit.extend([url for url in result['links'] 
-                                   if url not in self.visited_urls])
-                pbar.update(1)
-        
-        pbar.close()
-        return self.results
+    def summarize(self, url: str) -> Dict:
+        """Get comprehensive summary of a YouTube video."""
+        video_id = self.extract_video_id(url)
+        if not video_id:
+            return {"error": "Invalid YouTube URL"}
 
-    def save_results(self, filename: str = "crawl_results.json"):
-        """
-        Save crawl results to a JSON file.
-        """
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(self.results, f, ensure_ascii=False, indent=2)
+        metadata = self.get_video_metadata(url)
+        transcript = self.get_transcript(video_id)
+
+        return {
+            "video_id": video_id,
+            "metadata": metadata,
+            "transcript": transcript,
+            "url": url
+        }
 
 class WebContextFinder:
+    """Finds and analyzes web context including YouTube videos."""
     def __init__(self, max_search_results: int = 5):
-        """
-        Initialize web context finder with DuckDuckGo search.
-        """
         self.max_search_results = max_search_results
+        self.youtube_summarizer = YouTubeSummarizer()
+
+    def is_youtube_url(self, url: str) -> bool:
+        """Check if the given URL is a YouTube URL."""
+        parsed_url = urlparse(url)
+        return any(domain in parsed_url.netloc 
+                  for domain in ['youtube.com', 'youtu.be', 'www.youtube.com'])
 
     def find_relevant_context(self, query: str) -> str:
-        """
-        Find relevant web context for a given query using DuckDuckGo search.
-        """
+        """Find relevant web context, handling YouTube URLs specially."""
         try:
-            # Use DuckDuckGo search
+            # Handle YouTube URL
+            if self.is_youtube_url(query):
+                logging.info("Processing YouTube video...")
+                video_info = self.youtube_summarizer.summarize(query)
+                
+                if "error" in video_info:
+                    return f"Error: {video_info['error']}"
+                
+                metadata = video_info["metadata"]
+                context_parts = [
+                    f"YouTube Video Summary:",
+                    f"Title: {metadata.get('title')}",
+                    f"Uploader: {metadata.get('uploader')}",
+                    f"Upload Date: {metadata.get('upload_date')}",
+                    f"Duration: {metadata.get('duration')} seconds",
+                    f"Views: {metadata.get('view_count')}",
+                    "\nTranscript Summary:",
+                    video_info.get("transcript", "No transcript available")[:1000] + "..."
+                ]
+                
+                return "\n".join(context_parts)
+            
+            # Handle web search
+            from duckduckgo_search import DDGS
             with DDGS() as ddgs:
                 search_results = list(ddgs.text(query, max_results=self.max_search_results))
             
-            # Combine search results into context
             context_parts = []
-            crawler = Crawl4AI(max_pages=1)  # Limit to 1 page per result
+            crawler = Crawl4AI(max_pages=1)
             
             for result in search_results:
                 try:
                     url = result.get('href', '')
-                    crawl_result = crawler.crawl(url)
-                    
-                    # Combine title and snippet if available
-                    context_parts.append(f"Source: {url}\n")
-                    
-                    if crawl_result and len(crawl_result) > 0:
-                        # Take first 500 characters of text
-                        text = crawl_result[0].get('text', '')[:500]
-                        context_parts.append(f"Content Summary: {text}\n")
-                    
+                    if self.is_youtube_url(url):
+                        video_info = self.youtube_summarizer.summarize(url)
+                        if "error" not in video_info:
+                            context_parts.append(f"Related YouTube Video: {video_info['metadata']['title']}")
+                    else:
+                        crawl_result = crawler.crawl(url)
+                        if crawl_result:
+                            context_parts.append(f"Source: {url}")
+                            text = crawl_result[0].get('text', '')[:500]
+                            context_parts.append(f"Content Summary: {text}\n")
                 except Exception as e:
-                    logging.error(f"Error processing search result {url}: {str(e)}")
+                    logging.error(f"Error processing result {url}: {str(e)}")
+                    continue
             
-            return "\n".join(context_parts)
-        
+            return "\n".join(context_parts) if context_parts else "No relevant context found."
+            
         except Exception as e:
             logging.error(f"Error finding web context: {str(e)}")
             return f"Could not find web context. Error: {str(e)}"
 
 def determine_need_for_web_context(question: str) -> bool:
-    """
-    Determine if the question requires additional web context.
-    
-    This function uses some heuristics to decide if web searching would be helpful:
-    - Check for knowledge-seeking questions
-    - Identify topics that might benefit from current information
-    """
-    # Keywords that suggest need for web context
+    """Determine if the question requires additional web context."""
+    # Check for YouTube URL
+    if any(domain in question.lower() 
+           for domain in ['youtube.com', 'youtu.be']):
+        return True
+        
     context_keywords = [
         'recent', 'latest', 'current', 'today', 'now', 
         'happening', 'update', 'status', 'news', 
         'who is', 'what is', 'when did', 'how do', 
-        'explain', 'define', 'describe'
+        'explain', 'define', 'describe', 'video'
     ]
     
-    # Convert question to lowercase for case-insensitive matching
-    lower_question = question.lower()
-    
-    # Check if any context keywords are present
-    for keyword in context_keywords:
-        if keyword in lower_question:
-            return True
-    
-    # Additional length and complexity check
-    if len(lower_question.split()) > 5:
-        return True
-    
-    return False
+    question = question.lower()
+    return any(keyword in question for keyword in context_keywords) or len(question.split()) > 5
 
 def main():
+    """Main function to run the web context and analysis tool."""
     try:
-        # Initialize Groq client
-        client = Groq(
-            api_key="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"  # Replace with your actual Groq API key
-        )
+        # Install required packages
+        logging.info("Checking and installing required packages...")
+        install_required_packages()
 
-        print("Hello there! I can help you with questions and web content analysis.\n")
+        # Import Groq after installation
+        from groq import Groq
         
-        # Main interaction loop
-        while True:
-            # Get user's question
-            content = input("\nEnter your question or prompt (or 'Quit' to exit): \n")
+        # Initialize Groq client
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("GROQ_API_KEY environment variable not set")
             
-            # Check for exit commands
+        client = Groq(api_key=api_key)
+
+        print("\nWeb Context and Analysis Tool")
+        print("=" * 30)
+        print("1. Ask any question")
+        print("2. Paste a YouTube URL for summary")
+        print("3. Type 'quit' to exit")
+        print("=" * 30)
+        
+        while True:
+            content = input("\nEnter your question, YouTube URL, or prompt (or 'quit' to exit): \n").strip()
+            
             if content.lower() in ['quit', 'exit', 'bye']:
-                print("\nThank you for using the program. Goodbye!")
+                print("\nThank you for using the tool. Goodbye!")
                 break
 
-            # Determine if web context is needed
+            if not content:
+                print("Please enter a valid input.")
+                continue
+
             need_web_context = determine_need_for_web_context(content)
             crawled_content = ""
             
             if need_web_context:
-                print("\nFinding relevant web context...")
+                print("\nAnalyzing content...")
                 web_context_finder = WebContextFinder()
                 crawled_content = web_context_finder.find_relevant_context(content)
-                print(f"\nFound web context. Enhancing AI response...\n")
+                print("\nAnalysis complete. Generating response...\n")
 
-            # Prepare messages for AI
             messages = [
                 {
                     "role": "system",
-                    "content": '''You are an AI assistant designed to help the user. Use chain of thought reasoning. 
-                    Use bullet / numbered lists IF AND ONLY IF you need to. 
-                    When sharing code examples, always use markdown code blocks with appropriate language specification.
-                    If web context is provided, incorporate it into your response thoughtfully.'''
+                    "content": """You are an AI assistant designed to help users with general questions 
+                    and YouTube video summaries. Use chain of thought reasoning and provide clear, 
+                    concise responses. For YouTube videos, focus on key points and main takeaways."""
                 }
             ]
             
-            # Add crawled content as context if available
             if crawled_content:
                 messages.append({
                     "role": "system",
-                    "content": f"Supplementary Web Context: {crawled_content}"
+                    "content": f"Content Analysis Results: {crawled_content}"
                 })
             
-            # Add user's question
             messages.append({
                 "role": "user",
                 "content": content,
             })
 
-            # Retry mechanism for API calls
             max_retries = 3
             retry_delay = 2
             
@@ -318,10 +359,9 @@ def main():
                         model="llama-3.2-90b-vision-preview"
                     )
                     
-                    # Process the response
-                    AI_response = chat_completion.choices[0].message.content
+                    ai_response = chat_completion.choices[0].message.content
                     print("\nAI Response:")
-                    print(AI_response)
+                    print(ai_response)
                     break
                     
                 except Exception as e:

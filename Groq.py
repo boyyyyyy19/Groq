@@ -297,7 +297,7 @@ def main():
         from groq import Groq
         
         # Initialize Groq client
-        api_key = os.getenv("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")
+        api_key = "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"
         if not api_key:
             raise ValueError("GROQ_API_KEY environment variable not set")
             

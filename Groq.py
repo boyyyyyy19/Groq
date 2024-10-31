@@ -34,7 +34,8 @@ class TokenBucket:
         self.tokens = min(self.tokens, self.capacity)
         self.last_update = now
 
-        return self.tokens >= tokens and (self.tokens := self.tokens - tokens) is not None
+        self.tokens -= tokens
+        return self.tokens >= 0
 
 class Crawl4AI:
     """
@@ -296,7 +297,7 @@ def main():
         from groq import Groq
         
         # Initialize Groq client
-        api_key = os.getenv("GROQ_API_KEY")
+        api_key = os.getenv("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")
         if not api_key:
             raise ValueError("GROQ_API_KEY environment variable not set")
             

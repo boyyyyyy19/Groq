@@ -52,6 +52,30 @@ class TokenBucket:
         self.tokens -= tokens
         return self.tokens >= 0
 
+def install_required_packages():
+    """Check and install required packages if they're missing."""
+    required_packages = [
+        'groq',
+        'requests',
+        'beautifulsoup4',
+        'urllib3',
+        'tqdm',
+        'duckduckgo_search',
+        'youtube-transcript-api',
+        'yt-dlp'
+    ]
+    
+    for package in required_packages:
+        try:
+            __import__(package)
+        except ImportError:
+            print("Installing modules")  # Added this line to show installation message
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+
+# [Rest of the classes and code remains the same...]
+
 class Crawl4AI:
     """
     Web crawler optimized for AI context gathering.
@@ -120,27 +144,6 @@ class Crawl4AI:
             pass
 
         return results
-
-def install_required_packages():
-    """Check and install required packages if they're missing."""
-    required_packages = [
-        'groq',
-        'requests',
-        'beautifulsoup4',
-        'urllib3',
-        'tqdm',
-        'duckduckgo_search',
-        'youtube-transcript-api',
-        'yt-dlp'
-    ]
-    
-    for package in required_packages:
-        try:
-            __import__(package)
-        except ImportError:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
 
 class YouTubeSummarizer:
     """Handles YouTube video summarization functionality."""
@@ -301,11 +304,8 @@ def determine_need_for_web_context(question: str) -> bool:
 def main():
     """Main function to run the web context and analysis tool."""
     try:
-        # Suppress stdout during package installation
-        original_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
+        # Install required packages
         install_required_packages()
-        sys.stdout = original_stdout
 
         from groq import Groq
         

@@ -4,19 +4,34 @@ import os
 import re
 from datetime import datetime
 import time
-import logging
 import json
 from typing import List, Dict, Set, Optional
 from urllib.parse import urlparse, parse_qs
 import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
+import warnings
+import logging
 
-# Setup logging
+# Suppress all warnings
+warnings.filterwarnings('ignore')
+
+# Configure logging to only show INFO level messages
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
+
+# Create a filter to only show INFO messages
+class InfoFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno == logging.INFO
+
+# Add filter to the root logger
+logging.getLogger().addFilter(InfoFilter())
 
 class TokenBucket:
     """
@@ -48,6 +63,8 @@ class Crawl4AI:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (compatible; Crawl4AI/1.0; +http://example.com/bot)'
         })
+        # Disable SSL verification warnings
+        requests.packages.urllib3.disable_warnings()
 
     def clean_text(self, text: str) -> str:
         """Clean and normalize text content."""
@@ -59,10 +76,8 @@ class Crawl4AI:
 
     def extract_text(self, soup: BeautifulSoup) -> str:
         """Extract meaningful text from HTML content."""
-        # Remove unwanted elements
         for element in soup(['script', 'style', 'header', 'footer', 'nav']):
             element.decompose()
-
         return self.clean_text(soup.get_text(separator=' ', strip=True))
 
     def is_valid_url(self, url: str) -> bool:
@@ -76,7 +91,6 @@ class Crawl4AI:
     def crawl(self, url: str) -> List[Dict]:
         """Crawl a webpage and extract relevant content."""
         if not self.is_valid_url(url):
-            logging.warning(f"Invalid URL: {url}")
             return []
 
         results = []
@@ -84,12 +98,11 @@ class Crawl4AI:
             while not self.rate_limiter.consume():
                 time.sleep(0.1)
 
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(url, timeout=10, verify=False)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Extract content
             title = soup.title.string if soup.title else ''
             description = soup.find('meta', attrs={'name': 'description'})
             description = description.get('content', '') if description else ''
@@ -103,8 +116,8 @@ class Crawl4AI:
                 'timestamp': datetime.now().isoformat()
             })
 
-        except Exception as e:
-            logging.error(f"Error crawling {url}: {str(e)}")
+        except Exception:
+            pass
 
         return results
 
@@ -124,21 +137,21 @@ def install_required_packages():
     for package in required_packages:
         try:
             __import__(package)
-            logging.info(f"Package {package} is already installed")
         except ImportError:
-            logging.info(f"Installing package: {package}")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
 
 class YouTubeSummarizer:
     """Handles YouTube video summarization functionality."""
     def __init__(self):
-        # Import yt-dlp here after ensuring it's installed
         import yt_dlp
         self.yt_dlp = yt_dlp
         self.ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True
+            'extract_flat': True,
+            'no_color': True
         }
 
     def extract_video_id(self, url: str) -> Optional[str]:
@@ -152,8 +165,8 @@ class YouTubeSummarizer:
                     return parsed_url.path.split('/')[2]
             elif parsed_url.hostname == 'youtu.be':
                 return parsed_url.path[1:]
-        except Exception as e:
-            logging.error(f"Error extracting video ID: {str(e)}")
+        except Exception:
+            pass
         return None
 
     def get_video_metadata(self, url: str) -> Dict:
@@ -168,8 +181,7 @@ class YouTubeSummarizer:
                     'uploader': info.get('uploader', 'Unknown'),
                     'upload_date': info.get('upload_date', 'Unknown')
                 }
-        except Exception as e:
-            logging.error(f"Error getting video metadata: {str(e)}")
+        except Exception:
             return {}
 
     def get_transcript(self, video_id: str) -> Optional[str]:
@@ -181,8 +193,7 @@ class YouTubeSummarizer:
             transcript = YouTubeTranscriptApi.get_transcript(video_id)
             formatter = TextFormatter()
             return formatter.format_transcript(transcript)
-        except Exception as e:
-            logging.error(f"Error getting transcript: {str(e)}")
+        except Exception:
             return None
 
     def summarize(self, url: str) -> Dict:
@@ -216,15 +227,16 @@ class WebContextFinder:
     def find_relevant_context(self, query: str) -> str:
         """Find relevant web context, handling YouTube URLs specially."""
         try:
-            # Handle YouTube URL
             if self.is_youtube_url(query):
-                logging.info("Processing YouTube video...")
                 video_info = self.youtube_summarizer.summarize(query)
                 
                 if "error" in video_info:
-                    return f"Error: {video_info['error']}"
+                    return "Unable to process YouTube video."
                 
                 metadata = video_info["metadata"]
+                if not metadata:
+                    return "Unable to retrieve video information."
+                
                 context_parts = [
                     f"YouTube Video Summary:",
                     f"Title: {metadata.get('title')}",
@@ -232,13 +244,16 @@ class WebContextFinder:
                     f"Upload Date: {metadata.get('upload_date')}",
                     f"Duration: {metadata.get('duration')} seconds",
                     f"Views: {metadata.get('view_count')}",
-                    "\nTranscript Summary:",
-                    video_info.get("transcript", "No transcript available")[:1000] + "..."
                 ]
+                
+                if video_info.get("transcript"):
+                    context_parts.extend([
+                        "\nTranscript Summary:",
+                        video_info["transcript"][:1000] + "..."
+                    ])
                 
                 return "\n".join(context_parts)
             
-            # Handle web search
             from duckduckgo_search import DDGS
             with DDGS() as ddgs:
                 search_results = list(ddgs.text(query, max_results=self.max_search_results))
@@ -251,7 +266,7 @@ class WebContextFinder:
                     url = result.get('href', '')
                     if self.is_youtube_url(url):
                         video_info = self.youtube_summarizer.summarize(url)
-                        if "error" not in video_info:
+                        if "error" not in video_info and video_info['metadata']:
                             context_parts.append(f"Related YouTube Video: {video_info['metadata']['title']}")
                     else:
                         crawl_result = crawler.crawl(url)
@@ -259,19 +274,16 @@ class WebContextFinder:
                             context_parts.append(f"Source: {url}")
                             text = crawl_result[0].get('text', '')[:500]
                             context_parts.append(f"Content Summary: {text}\n")
-                except Exception as e:
-                    logging.error(f"Error processing result {url}: {str(e)}")
+                except Exception:
                     continue
             
             return "\n".join(context_parts) if context_parts else "No relevant context found."
             
-        except Exception as e:
-            logging.error(f"Error finding web context: {str(e)}")
-            return f"Could not find web context. Error: {str(e)}"
+        except Exception:
+            return "Unable to find web context."
 
 def determine_need_for_web_context(question: str) -> bool:
     """Determine if the question requires additional web context."""
-    # Check for YouTube URL
     if any(domain in question.lower() 
            for domain in ['youtube.com', 'youtu.be']):
         return True
@@ -289,17 +301,18 @@ def determine_need_for_web_context(question: str) -> bool:
 def main():
     """Main function to run the web context and analysis tool."""
     try:
-        # Install required packages
-        logging.info("Checking and installing required packages...")
+        # Suppress stdout during package installation
+        original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
         install_required_packages()
+        sys.stdout = original_stdout
 
-        # Import Groq after installation
         from groq import Groq
         
-        # Initialize Groq client
         api_key = "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"
         if not api_key:
-            raise ValueError("GROQ_API_KEY environment variable not set")
+            print("API key not set. Please set your Groq API key.")
+            return
             
         client = Groq(api_key=api_key)
 
@@ -334,7 +347,7 @@ def main():
                 {
                     "role": "system",
                     "content": """You are an AI assistant designed to help users with general questions 
-                    and YouTube video summaries. Use chain of thought reasoning and provide clear, 
+                    and YouTube video summaries. Always use chain of thought reasoning and provide clear, 
                     concise responses. For YouTube videos, focus on key points and main takeaways."""
                 }
             ]
@@ -365,17 +378,13 @@ def main():
                     print(ai_response)
                     break
                     
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logging.error(f"Attempt {attempt + 1} failed: {str(e)}")
-                        time.sleep(retry_delay * (attempt + 1))
-                    else:
-                        print(f"Error: Failed to get response after {max_retries} attempts.")
-                        logging.error(f"Final attempt failed: {str(e)}")
+                except Exception:
+                    if attempt == max_retries - 1:
+                        print("Unable to generate response. Please try again.")
+                    time.sleep(retry_delay * (attempt + 1))
 
     except Exception as e:
-        logging.error(f"Main function error: {str(e)}")
-        print(f"An error occurred: {str(e)}")
+        print("An error occurred. Please try again.")
 
 if __name__ == "__main__":
     main()

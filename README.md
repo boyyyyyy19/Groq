@@ -1,5 +1,5 @@
 # Groq
 For first time use 
 ```
-pip install requests beautifulsoup4 tqdm`
+pip install requests beautifulsoup4 tqdm
 
